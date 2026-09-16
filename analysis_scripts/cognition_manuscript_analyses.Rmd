@@ -5,7 +5,7 @@ date: "2026-07-02"
 output: html_document
 ---
 
-This file contains the code for the analyses described in manuscript. 
+This file contains the code for the analyses described in the manuscript "Animal cognition messaging shifts humans’ emotions but not behavior: A randomized experiment across chimpanzees and ʻalalā". 
 
 Install packages/load libraries
 ```{r, results='hide', message=FALSE, warning=FALSE}
