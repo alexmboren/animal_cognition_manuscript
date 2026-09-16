@@ -1,0 +1,1255 @@
+---
+title: "cognition manuscript analyses"
+author: "Alex Boren"
+date: "2026-07-02"
+output: html_document
+---
+
+This file contains the code for the analyses described in manuscript. 
+
+Install packages/load libraries
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(tidyverse)
+library(ggtext) 
+library(scales) 
+library(likert)
+library(dunn.test) 
+library(car) 
+library(psych)
+library(nnet)
+library(MASS) 
+library(vegan) 
+library(purrr)
+library(gtsummary)
+library(effectsize)
+library(patchwork)
+library(pwr)
+```
+
+# Quantitative Analysis
+
+Load quantitative data
+```{r}
+data_quant <- read.csv("data_main/data_combined.csv",
+                       header=TRUE,
+                       stringsAsFactors=TRUE, 
+                       sep=",",
+                       na.strings="NA",
+                       dec=".",
+                       strip.white=TRUE)
+```
+
+
+
+## PANAS scale analyses
+```{r}
+#Convert PANAS scale responses to numeric values
+panas_conversion <- c(
+  "Very slightly or not at all" = 1, 
+  "A little" = 2, 
+  "Moderately" = 3, 
+  "Quite a bit" = 4, 
+  "Extremely" = 5)
+
+# Convert columns e_1 to e_10 to numeric
+data_quant <- data_quant %>%
+  mutate(across(e_1:e_10, ~ panas_conversion[as.character(.x)] %>% as.numeric()))
+
+#Descriptive statistics (mean and standard deviation for each PANAS item per condition)
+panas_summary <- data_quant %>%
+  group_by(message) %>%
+  summarise(across(e_1:e_10,
+                   list(mean = ~mean(.x, na.rm = TRUE), 
+                        sd   = ~sd(.x, na.rm = TRUE))))
+panas_summary
+```
+Column names and corresponding emotions: 
+e_1 inspired 
+e_2 Afraid 
+e_3 Alert
+e_4 Upset 
+e_5 Excited
+e_6 Nervous 
+e_7 Enthusiastic 
+e_8 Scared 
+e_9 Determined 
+e_10 Distressed
+
+Positive words: e_1 inspired, e_3 Alert, e_5 Excited, e_7 Enthusiastic, e_9 Determined 
+Negative words: e_2 Afraid, e_4 Upset, e_6 Nervous, e_8 Scared, e_10 Distressed
+
+
+Prepare PANAS data for ANOVA and MANOVA
+```{r}
+#create subsetted data that only includes study2 responses (only study2 included the PANAS question)
+data_quant_2 <- data_quant %>%
+  filter(type == "final")
+
+#calculating means of positive and negative scores respectively 
+data_summary <- data_quant_2 %>% 
+  mutate(
+    positive_mean = rowMeans(select(., e_1, e_3, e_5, e_7, e_9), na.rm = TRUE),
+    negative_mean = rowMeans(select(., e_2, e_4, e_6, e_8, e_10), na.rm = TRUE))
+
+#z-score means
+data_summary <- data_summary %>%
+  mutate(
+    positive_mean_z = as.numeric(scale(positive_mean)),
+    negative_mean_z = as.numeric(scale(negative_mean)))
+```
+
+Run univariate ANOVAs testing effect of conservation message * cognition message * species on mean positive and negative PANAS scores, respectively
+```{r}
+#First, need to create binary factors from message condition
+data_summary <- data_summary %>%
+  mutate(
+    cognition    = factor(ifelse(message %in% c("Cognition", "Combined"), "yes", "no"),
+                          levels = c("no", "yes")),
+    conservation = factor(ifelse(message %in% c("Conservation", "Combined"), "yes", "no"),
+                          levels = c("no", "yes")))
+
+table(data_summary$message, data_summary$cognition, data_summary$conservation) #verify each message levels maps to one cell
+
+
+###Positive Affect ANOVA
+#create linear model
+m_pos <- lm(positive_mean_z ~ cognition * conservation * species, data = data_summary)
+
+#Run type III ANOVA, calculate effect size (partial eta square), and create results table
+options(contrasts = c("contr.sum", "contr.poly"))
+
+anova_results_pos <- Anova(m_pos, type = 3)
+anova_df_pos <- as.data.frame(anova_results_pos)
+anova_df_pos$Source <- rownames(anova_df_pos)
+anova_df_pos$MS <- anova_df_pos$`Sum Sq` / anova_df_pos$Df
+
+eta_df_pos <- as.data.frame(eta_squared(anova_results_pos, partial = TRUE))
+eta_df_pos$Source <- eta_df_pos$Parameter
+
+final_df_pos <- dplyr::left_join(anova_df_pos, eta_df_pos, by = "Source")
+final_df_pos <- final_df_pos[, c("Source", "Sum Sq", "Df", "MS", "F value", "Pr(>F)", "Eta2_partial")]
+final_df_pos <- final_df_pos %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+final_df_pos[is.na(final_df_pos)] <- ""
+
+print(final_df_pos)
+
+###Negative Affect ANOVA
+#create linear model
+m_neg <- lm(negative_mean_z ~ cognition * conservation * species, data = data_summary)
+
+#Run type III ANOVA, calculate effect size (partial eta square), and create results table
+anova_results_neg <- Anova(m_neg, type = 3)
+anova_results_neg
+anova_df_neg <- as.data.frame(anova_results_neg)
+anova_df_neg$Source <- rownames(anova_df_neg)
+anova_df_neg$MS <- anova_df_neg$`Sum Sq` / anova_df_neg$Df
+
+eta_df_neg <- as.data.frame(eta_squared(anova_results_neg, partial = TRUE))
+eta_df_neg$Source <- eta_df_neg$Parameter
+
+final_df_neg <- dplyr::left_join(anova_df_neg, eta_df_neg, by = "Source")
+final_df_neg <- final_df_neg[, c("Source", "Sum Sq", "Df", "MS", "F value", "Pr(>F)", "Eta2_partial")]
+final_df_neg <- final_df_neg %>%
+  mutate(across(where(is.numeric), ~ round(., 3)))
+final_df_neg[is.na(final_df_neg)] <- ""
+
+print(final_df_neg)
+```
+
+Run MANOVA on mean positive and negative PANAS scores compositely
+```{r}
+#Run MANOVA
+manova_panas <- manova(cbind(positive_mean, negative_mean) ~ cognition * conservation * species, data = data_summary)
+
+#Extract Pillai's Trace and then build results table
+pillai <- summary(manova_panas, test = "Pillai")$stats
+pillai_df <- as.data.frame(pillai[rownames(pillai) != "Residuals", ])
+
+manova_panas_df <- data.frame(
+  Source       = rownames(pillai_df),
+  Pillai       = round(pillai_df$Pillai, 3),
+  F_approx     = round(pillai_df$`approx F`, 3),
+  df1          = pillai_df$`num Df`,
+  df2          = pillai_df$`den Df`,
+  p_value      = round(pillai_df$`Pr(>F)`, 3)) %>%
+  mutate(
+    Eta2_partial = round((F_approx * df1) / (F_approx * df1 + df2), 3),
+    p_value      = ifelse(p_value < 0.001, "<.001", as.character(p_value)))
+manova_panas_df
+
+print(manova_panas_df)
+```
+
+
+## Likert item analyses (ANOVAs + MANOVA)
+
+Prepare Likert data for analysis
+```{r}
+#Convert Likert scale responses to numeric values
+likert_conversion <- c("Strongly disagree" = 1, "Somewhat disagree" = 2, 
+                       "Neither agree nor disagree" = 3, "Somewhat agree" = 4, 
+                       "Strongly agree" = 5)
+
+data_quant <- data_quant %>%
+  mutate(across(l_1:l_18, ~ likert_conversion[.x])) #the columns containing likert responses 
+
+#Descriptive statistics (mean and standard deviation for each likert item per condition)
+likert_summary <- data_quant %>%
+  group_by(message) %>%
+  summarise(across(l_1:l_18,
+                   list(mean = ~mean(.x, na.rm = TRUE), 
+                        sd   = ~sd(.x, na.rm = TRUE))))
+
+#Z-score the likert items (the z-scored likert items are now saved in a new dataframe called data_quant_z, which is what I call in the analysis)
+likert_cols <- paste0("l_", 1:18)
+data_quant_z <- data_quant %>%
+  mutate(across(all_of(likert_cols), ~ as.numeric(scale(.x))))
+
+#Make sure species is factors
+data_quant_z$species <- as.factor(data_quant_z$species)
+class(data_quant_z$species) #should say "factor"
+
+#Create binary factors from message condition for 2x2 design (same as PANAS)
+data_quant_z <- data_quant_z %>%
+  mutate(
+    cognition    = factor(ifelse(message %in% c("Cognition", "Combined"), "yes", "no"),
+                          levels = c("no", "yes")),
+    conservation = factor(ifelse(message %in% c("Conservation", "Combined"), "yes", "no"),
+                          levels = c("no", "yes")))
+
+table(data_quant_z$message, data_quant_z$cognition, data_quant_z$conservation) #verify each message levels maps to one cell
+```
+
+
+Check ANOVA assumptions
+```{r}
+##1. Multicollinearity (VIF scores)
+#Fit model on just one outcome (same predictor variables for each)
+vif_fit <- lm(l_1 ~ cognition * conservation * species,
+              data = data_quant_z)
+vif(vif_fit, type = 'predictor') #no multicollinearity because predictor variables from randomized video assignment
+
+##2. Normality of residuals (Shapiro-Wilk Test) and Homogeneity of variance (Levenne's Test)
+# Create a single grouping variable representing the 2x2 cells for levene's test
+data_quant_z <- data_quant_z %>%
+  mutate(group = interaction(cognition, conservation, species, drop = TRUE))
+
+assumption_likert <- map_dfr(paste0("l_", 1:18), ~ {
+  item <- .x
+fit <- lm(
+      as.formula(paste(item,
+                       "~ cognition * conservation * species")),
+      data = data_quant_z)
+    # Shapiro-Wilk on residuals
+    sw    <- shapiro.test(residuals(fit))
+    # Levene's test
+    lev <- leveneTest(data_quant_z[[item]], data_quant_z$group)
+    
+    data.frame(
+      Item        = item,
+      SW_W        = round(sw$statistic, 3),
+      SW_p        = round(sw$p.value, 3),
+      Levene_F    = round(lev$`F value`[1], 3),
+      Levene_p    = round(lev$`Pr(>F)`[1], 4),
+      stringsAsFactors = FALSE)})
+
+print(assumption_likert)
+#all items pass levene's test, and all items fail shapiro wilk test, which is expected given its sensitivity - using QQ plots to test normality of residuals instead (see below)
+
+#Assessing normality of residuals with QQ plots
+plots <- lapply(paste0("l_", 1:18), function(item) {
+  fit <- lm(
+    as.formula(paste(item, "~ cognition * conservation * species")),
+    data = data_quant_z)
+  res <- residuals(fit)
+  ggplot(data.frame(res = res), aes(sample = res)) +
+    stat_qq(size = 0.8) +
+    stat_qq_line(color = "red") +
+    ggtitle(item) +
+    theme_minimal()
+})
+wrap_plots(plots, ncol = 6)
+#all QQ plots show approximately normal distribution of residuals
+```
+
+Run Type III univariate ANOVAs on Likert items
+```{r}
+options(contrasts = c("contr.sum", "contr.poly"))
+
+View(data_quant)
+
+anova_likert <- map_dfr(likert_cols, ~ {
+  question <- .x
+  # Fit model
+  fit <- lm(as.formula(paste(question, "~ cognition * conservation * species")),
+            data = data_quant_z)
+  
+  # Type 3 ANOVA
+  aov_results <- Anova(fit, type = 3)
+  
+  # Build ANOVA dataframe
+  anova_df <- as.data.frame(aov_results)
+  anova_df$Source <- rownames(anova_df)
+  anova_df$MS <- anova_df$`Sum Sq` / anova_df$Df
+ 
+  # Partial eta squared
+  eta_df <- as.data.frame(eta_squared(aov_results, partial = TRUE, ci = NULL))
+  eta_df$Source <- eta_df$Parameter
+
+  # Format the final dataframe 
+  final_df <- dplyr::left_join(anova_df, eta_df, by = "Source")
+  final_df <- final_df[, c("Source", "Sum Sq", "Df", "MS", "F value", "Pr(>F)", "Eta2_partial")]
+  final_df$Question <- question
+  final_df <- final_df[, c("Question", "Source", "Sum Sq", "Df", "MS", "F value", "Pr(>F)", "Eta2_partial")]
+  final_df <- final_df %>%
+    mutate(across(where(is.numeric), ~ round(., 3)))
+  final_df[is.na(final_df)] <- ""
+  final_df
+})
+anova_likert
+```
+
+Run MANOVA on Likert items
+```{r}
+manova_likert <- manova(cbind(l_1, l_2, l_3, l_4, l_5, l_6, l_7, l_8, l_9, l_10, l_11, l_12, l_13, l_14, l_15, l_16, l_17, l_18)
+                        ~ cognition * conservation * species, data = data_quant_z)
+
+#Extract Pillai's Trace and then build results table
+pillai <- summary(manova_likert, test = "Pillai")$stats
+pillai_df <- as.data.frame(pillai[rownames(pillai) != "Residuals", ])
+
+manova_likert_df <- data.frame(
+  Source       = rownames(pillai_df),
+  Pillai       = round(pillai_df$Pillai, 3),
+  F_approx     = round(pillai_df$`approx F`, 3),
+  df1          = pillai_df$`num Df`,
+  df2          = pillai_df$`den Df`,
+  p_value      = round(pillai_df$`Pr(>F)`, 3)) %>%
+  mutate(
+    Eta2_partial = round((F_approx * df1) / (F_approx * df1 + df2), 3),
+    p_value      = ifelse(p_value < 0.001, "<.001", as.character(p_value)))
+manova_likert_df
+```
+
+
+## Mediation models assessing message type -> positive/negative affect -> attitude
+
+Create 3 attitude composites from Likert-scale items (traditional pro-conservation attitudes; cognition-influenced pro-conservation attitudes; empathy towards species)
+```{r}
+#Convert Likert scale responses to numeric values 
+likert_conversion <- c("Strongly disagree" = 1, "Somewhat disagree" = 2, 
+                       "Neither agree nor disagree" = 3, "Somewhat agree" = 4, 
+                       "Strongly agree" = 5)
+
+data_quant <- data_quant %>%
+  mutate(across(l_1:l_18, ~ likert_conversion[.x]))
+
+#Create attitude composites from Likert data (these items were theoretically selected based on item content)
+data_quant <- data_quant %>%
+  mutate(
+    conservation_attitude_mean = rowMeans(select(., l_1, l_16), na.rm = TRUE),
+    cognition_attitude_mean    = rowMeans(select(., l_7, l_8, l_9, l_18), na.rm = TRUE),
+    empathy_mean                = rowMeans(select(., l_4, l_11, l_14, l_17), na.rm = TRUE)
+  ) %>% #z-score composites
+  mutate(
+    conservation_attitude_z = as.numeric(scale(conservation_attitude_mean)),
+    cognition_attitude_z    = as.numeric(scale(cognition_attitude_mean)),
+    empathy_z                = as.numeric(scale(empathy_mean))
+  )
+
+#Cronbach's alpha for each composite
+alpha_conservation <- alpha(select(data_quant, l_1, l_16))
+alpha_cognition    <- alpha(select(data_quant, l_7, l_8, l_9, l_18))
+alpha_empathy       <- alpha(select(data_quant, l_4, l_11, l_14, l_17))
+
+cat("Conservation Attitude alpha:", round(alpha_conservation$total$raw_alpha, 3), "\n")
+cat("Cognition-Influenced Attitude alpha:", round(alpha_cognition$total$raw_alpha, 3), "\n")
+cat("Empathy alpha:", round(alpha_empathy$total$raw_alpha, 3), "\n")
+
+# Inspect item-level drop-if-deleted stats — useful if any alpha is below ~.70
+alpha_conservation$alpha.drop
+alpha_cognition$alpha.drop
+alpha_empathy$alpha.drop
+```
+
+Calculate Spearman-Brown split-half reliability coefficient for the two-item composite
+```{r}
+r_conservation <- cor(data_quant$l_1, data_quant$l_16, use = "complete.obs")
+sb_conservation <- (2 * r_conservation) / (1 + r_conservation)
+cat("Spearman-Brown reliability:", round(sb_conservation, 3), "\n")
+
+# For comparison, also pull the alpha you already have
+cat("Cronbach's alpha:", round(alpha_conservation$total$raw_alpha, 3), "\n")
+```
+
+
+Prepare and run mediation models
+```{r}
+#Recode message as a factor with Control as reference
+data_quant_2 <- data_quant %>%
+  filter(type == "final")
+
+data_quant_2 <- data_quant_2 %>%
+  mutate(message_f = factor(message, 
+                            levels = c("Control", "Cognition", 
+                                       "Conservation", "Combined")))
+# Verify
+table(data_quant_2$message_f)
+
+#Add z-socred positive and negative PANAS means to this dataaset
+data_quant_2 <- data_quant_2 %>% 
+  mutate(
+    positive_mean = rowMeans(select(., e_1, e_3, e_5, e_7, e_9), na.rm = TRUE),
+    negative_mean = rowMeans(select(., e_2, e_4, e_6, e_8, e_10), na.rm = TRUE))
+
+#z-score means
+data_quant_2 <- data_quant_2 %>%
+  mutate(
+    positive_mean_z = as.numeric(scale(positive_mean)),
+    negative_mean_z = as.numeric(scale(negative_mean)))
+
+###Run three separate mediation models per mediator/outcome combination, each contrasting one active message against control (a total of 18 models)
+
+#Define pathways
+outcomes  <- c("conservation_attitude_z", "cognition_attitude_z", "empathy_z")
+mediators <- c("positive_mean_z", "negative_mean_z")
+treatments <- c("CognitionvsControl", "ConservationvsControl", "CombinedvsControl")
+
+#2. Create dummy variables for each contrast against control
+data_quant_2 <- data_quant_2 %>%
+  mutate(
+    CognitionvsControl    = as.integer(message_f == "Cognition"),
+    ConservationvsControl = as.integer(message_f == "Conservation"),
+    CombinedvsControl     = as.integer(message_f == "Combined"))
+
+#3. Run mediation models and store results
+mediation_summaries_v2 <- list()
+
+set.seed(123)
+
+for (outcome in outcomes) {
+  for (mediator in mediators) {
+    for (treat in treatments) {
+      
+      # Include all three dummies so each contrast is adjusted for the others
+      other_treats <- setdiff(treatments, treat)
+      
+      mediator_formula <- as.formula(paste(
+        mediator, "~", treat, "+", paste(other_treats, collapse = " + ")))
+      
+      outcome_formula <- as.formula(paste(
+        outcome, "~", treat, "+", paste(other_treats, collapse = " + "), "+", mediator))
+      
+      mediator_model <- lm(mediator_formula, data = data_quant_2)
+      outcome_model  <- lm(outcome_formula,  data = data_quant_2)
+      
+      med_result <- mediate(
+        mediator_model,
+        outcome_model,
+        treat         = treat,
+        mediator      = mediator,
+        boot          = TRUE,
+        sims          = 500, #*NOTE* when sims=5000 this takes a long time to run - the analyses in the paper used sims = 5000, but for the sake of this RMD file I'm putting sims=500 so it compiles more quickly
+        control.value = 0,
+        treat.value   = 1
+      )
+      
+      key <- paste(treat, mediator, outcome, sep = "__")
+      mediation_summaries_v2[[key]] <- summary(med_result)
+      
+      cat("\n=====================================\n")
+      cat("Treatment:", treat, "| Mediator:", mediator, "| Outcome:", outcome, "\n")
+      cat("=====================================\n")
+      print(summary(med_result))
+    }
+  }
+}
+
+#Extract results table
+results_table_v2 <- map_dfr(names(mediation_summaries_v2), function(key) {
+  parts <- strsplit(key, "__")[[1]]
+  extract_mediation_stats(mediation_summaries_v2[[key]], parts[1], parts[2], parts[3])
+}) %>%
+  mutate(ACME_p_adj = round(p.adjust(ACME_p, method = "BH"), 4))
+
+print(results_table_v2)
+```
+
+
+## Petition signing analysis and visualization
+
+Petition stacked bar plot
+```{r}
+#Count petition signage per message condition
+data_quant %>%
+  count(petition)
+
+# Recode petition to simplified categories
+data_petition_plot <- data_quant %>%
+  mutate(
+    petition_cat = case_when(
+      str_detect(petition, "do not wish") ~ "No petition",
+      str_detect(petition, "cognitive abilities of chimpanzees|cognitive abilities of the") ~ "Cognition",
+      str_detect(petition, "to both protect") ~ "Combined",
+      str_detect(petition, "protect chimpanzees|protect ʻAlalā") ~ "Conservation"
+    ),
+    petition_cat = factor(petition_cat, levels = c("Combined", "Conservation", "Cognition", "No petition")),
+    message = factor(message, levels = c("Cognition", "Combined", "Conservation", "Control")),
+    species = factor(species, levels = c("Chimpanzee", "ʻAlalā"))
+  )
+
+# Get counts
+petition_plot_counts <- data_petition_plot %>%
+  count(message, petition_cat) %>%
+  group_by(message) %>%
+  mutate(total = sum(n))
+
+# Plot
+petition_plot <-  ggplot(petition_plot_counts, aes(x = message, y = n, fill = petition_cat)) +
+  geom_col() +
+  geom_text(aes(label = n), position = position_stack(vjust = 0.5),
+            color = "black", size = 5) +
+  scale_fill_manual(
+    values = c(
+"No petition"  = "#999999",  # gray
+  "Conservation" = "#0072B2",  # blue
+  "Cognition"    = "#F0E442",  # yellow
+  "Combined"     = "#D55E00"
+    ),
+    name = "Petition Choice"
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  labs(x = "Message", y = "Participant Count") +
+  theme_minimal(base_size = 14) +
+  theme(
+    legend.position    = "right",
+    axis.text.x        = element_text(angle = 45, hjust = 1)
+  )
+
+petition_plot
+
+ggsave("petition_plot.png", petition_plot, width = 200, height =150, units = "mm", dpi = 300)
+```
+
+Assess if there is an association between petition choice and study type 
+```{r}
+#Build contingency table and run chi square test
+petition_studytype_contin <- table(data_petition_plot$type, data_petition_plot$petition_cat)
+petition_studytype_contin
+
+chisq.test(petition_studytype_contin)
+#non-significant association, justifying the combination of petition choice data across study 1 and 2 
+```
+
+Assess if there is an association between petition choice and message condition, and between petition choice and species
+```{r}
+#Message condition
+petition_message_contin <- table(data_petition_plot$message, data_petition_plot$petition_cat)
+petition_message_contin
+
+chisq.test(petition_message_contin)
+
+#Species
+petition_species_contin <- table(data_petition_plot$species, data_petition_plot$petition_cat)
+petition_species_contin
+
+chisq.test(petition_species_contin)
+
+#non-significant association for both
+```
+
+## Donation choice analysis
+
+Assess if there is an association between donation choice and study type
+```{r}
+##Combine donation choice categories into four groups (conservation, cognition, both, none) so donation choice is not split by species
+data_quant <- data_quant %>%
+  mutate(donation_group = case_when(
+    donation_choice %in% c(
+      "Chimpanzee conservation and research on chimpanzee cognition: donation website",
+      "ʻAlalā conservation and research on ʻAlalā cognition: donation website"
+    ) ~ "both",
+    donation_choice %in% c(
+      "Chimpanzee conservation: donation website",
+      "ʻAlalā conservation: donation website"
+    ) ~ "conservation",
+    donation_choice %in% c(
+      "Research on chimpanzee cognition: donation website",
+      "Research on ʻAlalā cognition: donation website"
+    ) ~ "cognition",
+    donation_choice == "No I don't want to donate" ~ "none",
+    TRUE ~ NA_character_
+  ))
+
+#turn into a factor 
+data_quant$donation_group <- factor(
+  data_quant$donation_group,
+  levels = c("none", "conservation", "cognition", "both"))
+
+
+##Build contingency table and run chi square test
+donate_studytype_contin <- table(data_quant$type, data_quant$donation_group)
+chisq.test(donate_studytype_contin)
+
+#small cell sizes...confirm with fisher's exact test
+fisher.test(donate_studytype_contin, simulate.p.value = TRUE, B = 10000) #p=0.7536
+```
+Non-significant association, okay to combine across study 1 and 2
+
+# Qualitative Analysis
+
+## Word association analysis + visualization 
+
+Load word association data 
+```{r}
+#word association data from study 2
+data_words2 <- read.csv("data_main/words_study2.csv",
+                       header=TRUE,
+                       stringsAsFactors=TRUE, 
+                       sep=",",
+                       na.strings="NA",
+                       dec=".",
+                       strip.white=TRUE)
+
+#word association data from study 1
+data_words1 <- read.csv("data_main/words_study1.csv",
+                       header=TRUE,
+                       stringsAsFactors=TRUE, 
+                       sep=",",
+                       na.strings="NA",
+                       dec=".",
+                       strip.white=TRUE)
+```
+
+
+Chi square test assessing association between study type and word sentiment
+```{r}
+#Combine word association data from study 1 and 2
+data_words_combined <- bind_rows(data_words1, data_words2)
+
+#Create "sentiment" column (contains positive, negative, or neutral)
+data_words_combined <- data_words_combined %>%
+  pivot_longer(
+    cols = c(Positive, Negative, Neutral),
+    names_to = "sentiment",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value))
+
+#Build contingency table and run chi square test
+wordsentiment_studytype_contin <- table(data_words_combined$type, data_words_combined$sentiment)
+wordsentiment_studytype_contin
+
+wordsentiment_studytype_chisq <- chisq.test(wordsentiment_studytype_contin)
+wordsentiment_studytype_chisq
+
+# Cramer's V
+n <- sum(wordsentiment_studytype_contin)
+sqrt(wordsentiment_studytype_chisq$statistic / (n * (2 - 1)))
+```
+Since effect size is 0.148 (nearing threshold of 0.15) we will analyze the word association data separately per study type
+
+
+### Study 2 word association chi square tests + visualiation
+
+Association btwn sentiment and message type
+```{r}
+#Create "sentiment" column (contains positive, negative, or neutral)
+data_words2 <- data_words2 %>%
+  pivot_longer(
+    cols = c(Positive, Negative, Neutral),
+    names_to = "sentiment",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value))
+
+#Build contingency table and run chi square test
+wordsentiment2_message_contin <- table(data_words2$message, data_words2$sentiment)
+wordsentiment2_message_contin
+
+wordsentiment2_message_test <- chisq.test(wordsentiment2_message_contin)
+wordsentiment2_message_test
+
+#View standardized residuals to assess directionality
+wordsentiment2_message_test$stdres
+```
+
+Association btwn sentiment and species
+```{r}
+#Build contingency table and run chi square test
+wordsentiment2_species_contin <- table(data_words2$species, data_words2$sentiment)
+wordsentiment2_species_contin
+
+wordsentiment2_species_test <- chisq.test(wordsentiment2_species_contin)
+wordsentiment2_species_test
+
+#View standardized residuals to assess directionality
+wordsentiment2_species_test$stdres
+```
+
+Association btwn sentiment and species+message groups
+```{r}
+#create species+message groups
+data_words2 <- data_words2 %>%
+  mutate(species_message = paste(species, message, sep = "_"))
+
+# check you actually have 8 groups
+table(data_words2$species_message)
+
+#Build contingency table and run chi square test
+wordsentiment2_group_contin <- table(data_words2$species_message, data_words2$sentiment)
+wordsentiment2_group_contin
+
+wordsentiment2_group_test <- chisq.test(wordsentiment2_group_contin)
+wordsentiment2_group_test
+
+#View standardized residuals to assess directionality
+wordsentiment2_group_test$stdres
+```
+
+Word association data visualization - study 2
+```{r}
+# Summarize the counts of each sentiment by group
+wordsentiment2_summary <- data_words2 %>%
+  group_by(species, message) %>%
+  summarise(
+    Positive = sum(Positive, na.rm = TRUE),
+    Negative = sum(Negative, na.rm = TRUE),
+    Neutral  = sum(Neutral, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(Positive, Negative, Neutral),
+               names_to = "sentiment",
+               values_to = "count")
+
+#Plot sentiment distribution of words (study 2)
+wordsentiment2_prop <- wordsentiment2_summary %>%
+  group_by(species, message) %>%
+  mutate(prop = count / sum(count))
+
+wordsentiment2_plot <- ggplot(wordsentiment2_prop,
+                         aes(x = message, y = prop, fill = sentiment)) +
+  geom_col() +
+  facet_wrap(~ species) +
+  labs(x = "Message", y = "Proportion", fill = "Sentiment") +
+  theme_minimal(base_size = 14) +
+  scale_fill_manual(values = c(
+    Positive = "#4476a8",
+    Negative = "#DDCC77",
+    Neutral  = "#82cae9")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+wordsentiment2_plot
+
+ggsave("wordsentiment2_plot.png", width = 200, height =150, units = "mm", dpi = 300)
+```
+
+
+### Study 1 word association chi square tests + visualiation
+
+Association btwn sentiment and message type
+```{r}
+#Create "sentiment" column (contains positive, negative, or neutral)
+data_words1 <- data_words1 %>%
+  pivot_longer(
+    cols = c(Positive, Negative, Neutral),
+    names_to = "sentiment",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value))
+
+View(data_words1)
+
+#Build contingency table and run chi square test
+wordsentiment1_message_contin <- table(data_words1$message, data_words1$sentiment)
+wordsentiment1_message_contin
+
+wordsentiment1_message_test <- chisq.test(wordsentiment1_message_contin)
+wordsentiment1_message_test
+
+#View standardized residuals to assess directionality
+wordsentiment1_message_test$stdres
+```
+
+Association btwn sentiment and species
+```{r}
+#Build contingency table and run chi square test
+wordsentiment1_species_contin <- table(data_words1$species, data_words1$sentiment)
+wordsentiment1_species_contin
+
+wordsentiment1_species_test <- chisq.test(wordsentiment1_species_contin)
+wordsentiment1_species_test
+
+#View standardized residuals to assess directionality
+wordsentiment1_species_test$stdres
+```
+
+Association btwn sentiment and species+message groups
+```{r}
+#create species+message groups
+data_words1 <- data_words1 %>%
+  mutate(species_message = paste(species, message, sep = "_"))
+
+# check you actually have 8 groups
+table(data_words1$species_message)
+
+#Build contingency table and run chi square test
+wordsentiment1_group_contin <- table(data_words1$species_message, data_words1$sentiment)
+wordsentiment1_group_contin
+
+wordsentiment1_group_test <- chisq.test(wordsentiment1_group_contin)
+wordsentiment1_group_test
+
+#View standardized residuals to assess directionality
+wordsentiment1_group_test$stdres
+```
+
+Word association data summary + visualization - study 1
+```{r}
+# Summarize the counts of each sentiment by group
+wordsentiment1_summary <- data_words1 %>%
+  group_by(species, message) %>%
+  summarise(
+    Positive = sum(Positive, na.rm = TRUE),
+    Negative = sum(Negative, na.rm = TRUE),
+    Neutral  = sum(Neutral, na.rm = TRUE)
+  ) %>%
+  pivot_longer(cols = c(Positive, Negative, Neutral),
+               names_to = "sentiment",
+               values_to = "count")
+
+#Plot sentiment distribution of words (study 1)
+wordsentiment1_prop <- wordsentiment1_summary %>%
+  group_by(species, message) %>%
+  mutate(prop = count / sum(count))
+
+wordsentiment1_plot <- ggplot(wordsentiment1_prop,
+                         aes(x = message, y = prop, fill = sentiment)) +
+  geom_col() +
+  facet_wrap(~ species) +
+  labs(x = "Message", y = "Proportion", fill = "Sentiment") +
+  theme_minimal(base_size = 14) +
+  scale_fill_manual(values = c(
+    Positive = "#4476a8",
+    Negative = "#DDCC77",
+    Neutral  = "#82cae9")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+wordsentiment1_plot
+
+ggsave("wordsentiment1_plot.png", width = 200, height =150, units = "mm", dpi = 300)
+```
+
+## Video short response analysis + visualization
+
+Load short response about video data
+```{r}
+#short response about video data from study 2
+data_sr2 <- read.csv("data_main/videoSR_study2.csv",
+                       header=TRUE,
+                       stringsAsFactors=TRUE, 
+                       sep=",",
+                       na.strings="NA",
+                       dec=".",
+                       strip.white=TRUE)
+
+#short response about video data from study 1
+data_sr1 <- read.csv("data_main/videoSR_study1.csv",
+                       header=TRUE,
+                       stringsAsFactors=TRUE, 
+                       sep=",",
+                       na.strings="NA",
+                       dec=".",
+                       strip.white=TRUE)
+```
+
+### Video short response sentiment analyses 
+
+Chi square test assessing association between study type and word sentiment
+```{r}
+#Combine short response data from study 1 and 2
+data_sr_combined <- bind_rows(data_sr1, data_sr2)
+
+#Create "sentiment" column (contains positive, negative, or neutral)
+data_sr_combined <- data_sr_combined %>%
+  pivot_longer(
+    cols = c(Positive, Negative, Neutral),
+    names_to = "sentiment",
+    values_to = "value"
+  ) %>%
+  filter(!is.na(value))
+
+#Build contingency table and run chi square test
+srsentiment_studytype_contin <- table(data_sr_combined$type, data_sr_combined$sentiment)
+srsentiment_studytype_contin 
+
+srsentiment_studytype_chisq <- chisq.test(srsentiment_studytype_contin)
+srsentiment_studytype_chisq
+
+# Cramer's V
+n <- sum(srsentiment_studytype_contin)
+sqrt(srsentiment_studytype_chisq$statistic / (n * (2 - 1)))
+```
+
+We are combining short response data across study 1 and 2 due to small effect size, and as such will be conducing the chi square tests on the data_sr_combined dataset
+
+Association btwn sentiment and message type
+```{r}
+#Build contingency table and run chi square test
+srsentiment_message_contin <- table(data_sr_combined$Message, data_sr_combined$sentiment)
+srsentiment_message_contin
+
+srsentiment_message_test <- chisq.test(srsentiment_message_contin)
+srsentiment_message_test 
+
+#View standardized residuals to assess directionality
+srsentiment_message_test$stdres
+```
+
+Association btwn sentiment and species
+```{r}
+#Build contingency table and run chi square test
+srsentiment_species_contin <- table(data_sr_combined$species, data_sr_combined$sentiment)
+srsentiment_species_contin
+
+srsentiment_species_test <- chisq.test(srsentiment_species_contin)
+srsentiment_species_test
+
+#View standardized residuals to assess directionality
+srsentiment_species_test$stdres
+```
+
+Association btwn sentiment and species+message groups
+```{r}
+#create species+message groups
+data_sr_combined <- data_sr_combined %>%
+  mutate(species_message = paste(species, Message, sep = "_"))
+
+# check you actually have 8 groups
+table(data_sr_combined$species_message)
+
+#Build contingency table and run chi square test
+srsentiment_group_contin <- table(data_sr_combined$species_message, data_sr_combined$sentiment)
+srsentiment_group_contin
+
+srsentiment_group_test <- chisq.test(srsentiment_group_contin)
+srsentiment_group_test
+
+#View standardized residuals to assess directionality
+srsentiment_group_test$stdres
+```
+
+Short response sentiment data visualization
+```{r}
+#Plot sentiment distribution of words (study 2)
+srsentiment_prop <- data_sr_combined %>%
+  count(species, Message, sentiment, name = "n") %>%
+  group_by(species, Message) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+srsentiment_plot <- ggplot(srsentiment_prop,
+                         aes(x = Message, y = prop, fill = sentiment)) +
+  geom_col() +
+  facet_wrap(~ species) +
+  labs(x = "Message", y = "Proportion", fill = "Sentiment") +
+  theme_minimal(base_size = 14) +
+  scale_fill_manual(values = c(
+    Positive = "#4476a8",
+    Negative = "#DDCC77",
+    Neutral  = "#82cae9")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+srsentiment_plot
+
+ggsave("wordsentiment2_plot.png", width = 200, height =150, units = "mm", dpi = 300)
+```
+
+### Video short response axial code analyses
+
+Axial code chi square analysis for short response about video
+```{r}
+#Create "code" column (contains the five axial code columns)
+data_sr_combined <- data_sr_combined %>%
+  mutate(code = case_when(
+    Informational == 1 ~ "Informational",
+    Interest == 1 ~ "Interest",
+    Empathy == 1 ~ "Empathy",
+    Action == 1 ~ "Action",
+    Disengaged == 1 ~ "Disengaged",
+    TRUE ~ NA_character_
+  ))
+
+#verify:
+#row count should be unchanged from before this step
+nrow(data_sr_combined)
+
+# each row's five code columns should sum to exactly 1
+table(rowSums(data_sr_combined[, c("Informational","Interest","Empathy","Action","Disengaged")], na.rm = TRUE))
+```
+
+Association btwn axial code and message type
+```{r}
+#Build contingency table and run chi square test
+srcode_message_contin <- table(data_sr_combined$Message, data_sr_combined$code)
+srcode_message_contin
+
+srcode_message_test <- chisq.test(srcode_message_contin)
+srcode_message_test
+
+#View standardized residuals to assess directionality
+srcode_message_test$stdres
+
+#small cell sizes...two options to confirm results: 
+#confirm with fisher's exact test
+fisher.test(srcode_message_contin, simulate.p.value = TRUE, B = 10000)
+
+#alternatively, simulate p - value
+chisq.test(srcode_message_contin, simulate.p.value = TRUE, B = 10000)
+```
+
+Association btwn axial code and species
+```{r}
+#Build contingency table and run chi square test
+srcode_species_contin <- table(data_sr_combined$species, data_sr_combined$code)
+srcode_species_contin
+
+srcode_species_test <- chisq.test(srcode_species_contin)
+srcode_species_test
+
+#View standardized residuals to assess directionality
+srcode_species_test$stdres
+```
+
+Association btwn axial code and species+message groups
+```{r}
+#create species+message groups
+data_sr_combined <- data_sr_combined %>%
+  mutate(species_message = paste(species, Message, sep = "_"))
+
+# check you actually have 8 groups
+table(data_sr_combined$species_message)
+
+#Build contingency table and run chi square test
+srcode_group_contin <- table(data_sr_combined$species_message, data_sr_combined$code)
+srcode_group_contin
+
+srcode_group_test <- chisq.test(srcode_group_contin)
+srcode_group_test
+
+#View standardized residuals to assess directionality
+srcode_group_test$stdres
+
+#small cell sizes...two options to confirm results: 
+#confirm with fisher's exact test
+fisher.test(srcode_group_contin, simulate.p.value = TRUE, B = 10000)
+
+#alternatively, simulate p - value
+chisq.test(srcode_group_contin, simulate.p.value = TRUE, B = 10000)
+```
+
+Stacked bar plot showing proportion of axial codes per message type faceted by species
+```{r}
+srcode_prop <- data_sr_combined %>%
+  filter(!is.na(code)) %>%
+  count(species, Message, code, name = "n") %>%
+  group_by(species, Message) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+srcode_plot <- ggplot(srcode_prop, aes(x = Message, y = prop, fill = code)) +
+  geom_col() +
+  facet_wrap(~ species) +
+  labs(x = "Message", y = "Proportion", fill = "Theme") +
+  theme_minimal(base_size = 14) +
+  scale_fill_manual(values = c(
+    "Informational" = "#E69F00",   
+    "Interest" = "#CC79A7",  
+    "Empathy" = "#009E73", 
+    "Action" = "#D55E00",        
+    "Disengaged" = "#56B4E9")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+srcode_plot
+ggsave("srcode_plot.png", width = 200, height =150, units = "mm", dpi = 300)
+```
+
+## Donation short response axial code analyses
+
+Load donation short response data
+```{r}
+#donation short response data (combined study 1 and 2)
+data_donation <- read.csv("data_main/donationSR_combined.csv",
+                       header=TRUE,
+                       stringsAsFactors=TRUE, 
+                       sep=",",
+                       na.strings="NA",
+                       dec=".",
+                       strip.white=TRUE)
+```
+
+Axial code chi square analysis for short response about video
+```{r}
+#Create "code" column (contains the five axial code columns)
+data_donation <- data_donation %>%
+  mutate(code = case_when(
+    Alternate.Support == 1 ~ "Alternate.Support",
+    Financial.Constraints == 1 ~ "Financial.Constraints",
+    Format.Critique == 1 ~ "Format.Critique",
+    Information.Gap == 1 ~ "Information.Gap",
+    Low.Motivation == 1 ~ "Low.Motivation",
+    TRUE ~ NA_character_
+  ))
+
+#verify:
+#row count should be unchanged from before this step
+nrow(data_donation)
+```
+
+Association between axial code and study type (justificaiton for combining study 1 and 2 responses)
+```{r}
+#Build contingency table and run chi square test
+donatecode_study_contin <- table(data_donation$type, data_donation$code)
+chisq.test(donatecode_study_contin)
+```
+
+Association btwn axial code and message type
+```{r}
+#Build contingency table and run chi square test
+donatecode_message_contin <- table(data_donation$message, data_donation$code)
+donatecode_message_contin
+
+chisq.test(donatecode_message_contin)
+
+#small cell sizes...two options to confirm results: 
+#confirm with fisher's exact test
+fisher.test(donatecode_message_contin, simulate.p.value = TRUE, B = 10000)
+
+#alternatively, simulate p - value
+chisq.test(donatecode_message_contin, simulate.p.value = TRUE, B = 10000)
+```
+
+Association btwn axial code and species
+```{r}
+#Build contingency table and run chi square test
+donatecode_species_contin <- table(data_donation$species, data_donation$code)
+donatecode_species_contin
+
+chisq.test(donatecode_species_contin)
+```
+
+Association btwn axial code and species+message groups
+```{r}
+#create species+message groups
+data_donation<- data_donation %>%
+  mutate(species_message = paste(species, message, sep = "_"))
+
+# check you actually have 8 groups
+table(data_donation$species_message)
+
+#Build contingency table and run chi square test
+donatecode_group_contin <- table(data_donation$species_message, data_donation$code)
+donatecode_group_contin
+
+chisq.test(donatecode_group_contin)
+
+#small cell sizes...two options to confirm results: 
+#confirm with fisher's exact test
+fisher.test(donatecode_group_contin, simulate.p.value = TRUE, B = 10000)
+
+#alternatively, simulate p - value
+chisq.test(donatecode_group_contin, simulate.p.value = TRUE, B = 10000)
+```
+
+Stacked bar plot visualization of donation explanation short response axial codes
+```{r}
+data_donation_plot <- data_donation %>%
+  pivot_longer(
+    cols = c(Financial.Constraints,
+      Information.Gap,
+      Low.Motivation,
+      Format.Critique,
+      Alternate.Support),
+    names_to = "code_plot",
+    values_to = "value"
+  ) %>%
+  mutate(code = gsub("\\.", " ", code)) %>% #adds space between legend items
+  filter(!is.na(value))
+
+#create proportion of donation themes per participant for plotting
+data_donation_prop <- data_donation_plot %>%
+  group_by(species, message, code_plot) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(species, message) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup()
+
+#plot
+donation_themes <- ggplot(data_donation_prop,
+       aes(x = message, y = prop, fill = code_plot)) +
+  geom_col() +
+  facet_wrap(~ species) +
+  labs(
+    x = "Message",
+    y = "Proportion",
+    fill = "Theme"
+  ) +
+  theme_minimal(base_size = 14) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_fill_manual(values = c(
+    "Alternate.Support" = "#E69F00",
+    "Financial.Constraints" = "#CC79A7",
+    "Format.Critique" = "#009E73",
+    "Information.Gap" = "#D55E00",
+    "Low.Motivation" = "#56B4E9"
+  )) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+donation_themes
+
+ggsave("donation_themes.png", width = 200, height =150, units = "mm", dpi = 300)
+```
+
+## Pilot survey power analysis
+
+Load pilot survey data
+```{r}
+data_pilot <- read.csv("data/pilot/quant_chimpalala_combined.csv",
+                       header=TRUE,
+                       stringsAsFactors=TRUE, 
+                       sep=",",
+                       na.strings="NA",
+                       dec=".",
+                       strip.white=TRUE)
+
+```
+
+ANOVA to determine effect size
+```{r}
+#ANOVA to determine effect size for each likert question (compared across 4 message types)
+likert_cols <- paste0("l_", 1:20)
+anova_likert_message_eta <- map_dfr(likert_cols, function(var) {
+  model <- aov(reformulate("message", var), data = data_pilot)
+  anova_result <- summary(model)[[1]]
+  
+  # Compute partial eta squared 
+  ss_between <- anova_result["message", "Sum Sq"]
+  ss_within <- anova_result["Residuals", "Sum Sq"]
+  eta_sq_partial <- ss_between / (ss_between + ss_within)
+  
+  data.frame(
+    Question = var,
+    p_value = anova_result["message", "Pr(>F)"],
+    eta_sq = eta_sq_partial
+  )
+})
+print(anova_likert_message_eta) #shows p-value and eta squared for each likert question 
+
+#estimate average effect size (average eta)
+mean_eta <- mean(anova_likert_message_eta$eta_sq, na.rm = TRUE)
+f <- sqrt(mean_eta / (1 - mean_eta))
+f 
+
+#run ANOVA power analysis using calculated effect size to determine sample size
+pwr.anova.test(k = 4, f = 0.2, sig.level = 0.05, power = 0.8)
+```
+We need ~89 participants per message type (~356 total) to achieved the desired power
